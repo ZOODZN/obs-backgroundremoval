@@ -21,7 +21,6 @@ jobs:
       contents: read
     uses: ./.github/workflows/plugin-build-macos.yml
     with:
-      job-index: 0
       runs-on: macos-15
       DEVELOPER_DIR: /Applications/Xcode_16.4.app
       OSX_DEPLOYMENT_TARGET: ${{ needs.ci-config.outputs.OSX_DEPLOYMENT_TARGET }}

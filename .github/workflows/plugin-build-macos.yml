@@ -13,10 +13,6 @@ name: Plugin Build macOS
 on:
   workflow_call:
     inputs:
-      job-index:
-        description: The job index for logging.
-        required: true
-        type: number
       runs-on:
         description: The runner label to run this workflow on.
         required: true
@@ -33,21 +29,6 @@ on:
         description: VCPKG_BINARY_SOURCES environment variable for the build jobs.
         required: true
         type: string
-      build-obs:
-        description: Flag to build OBS Studio.
-        required: false
-        type: boolean
-        default: true
-      install-vcpkg:
-        description: Flag to install vcpkg dependencies.
-        required: false
-        type: boolean
-        default: true
-      build-onnxruntime:
-        description: Flag to build ONNX Runtime.
-        required: false
-        type: boolean
-        default: true
 
 
 permissions: {}
@@ -119,7 +100,6 @@ jobs:
           if ($actualGitCommit -ne $env:GIT_COMMIT) { throw "Git commit not match: expected $env:GIT_COMMIT, actual $actualGitCommit" }
 
       - name: Checkout obs-studio
-        if: inputs.build-obs
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: obsproject/obs-studio
@@ -129,7 +109,6 @@ jobs:
           filter: blob:none
 
       - name: Assert obs-studio git commit
-        if: inputs.build-obs
         shell: pwsh
         working-directory: obs-studio
         env:
@@ -139,7 +118,6 @@ jobs:
           if ($actualGitCommit -ne $env:GIT_COMMIT) { throw "Git commit not match: expected $env:GIT_COMMIT, actual $actualGitCommit" }
 
       - name: Checkout ONNX Runtime
-        if: inputs.build-onnxruntime
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: microsoft/onnxruntime
@@ -149,7 +127,6 @@ jobs:
           submodules: recursive
 
       - name: Assert onnxruntime git commit
-        if: inputs.build-onnxruntime
         shell: pwsh
         working-directory: onnxruntime
         env:
@@ -164,7 +141,6 @@ jobs:
           ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
       - name: Build OBS (macOS)
-        if: inputs.build-obs
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -213,7 +189,7 @@ jobs:
           Install-Obs
 
       - name: Upload OBS build logs
-        if: inputs.build-obs && always()
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Build OBS logs
@@ -223,7 +199,6 @@ jobs:
           retention-days: 7
 
       - name: Install dependencies from vcpkg.json (arm64-osx-obs)
-        if: inputs.install-vcpkg
         shell: pwsh
         env:
           VCPKG_ROOT: '${{ github.workspace }}/vcpkg'
@@ -237,7 +212,6 @@ jobs:
           & $vcpkgExe install --triplet=arm64-osx-obs --x-install-root=vcpkg_arm64_installed
 
       - name: Install dependencies from vcpkg.json (x64-osx-obs)
-        if: inputs.install-vcpkg
         shell: pwsh
         env:
           VCPKG_ROOT: '${{ github.workspace }}/vcpkg'
@@ -251,7 +225,6 @@ jobs:
           & $vcpkgExe install --triplet=x64-osx-obs --x-install-root=vcpkg_x64_installed
 
       - name: Lipo vcpkg_installed
-        if: inputs.install-vcpkg
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         run: |
           ./scripts/lipo_vcpkg_macos.sh \
@@ -260,7 +233,6 @@ jobs:
             ./vcpkg_x64_installed/x64-osx-obs
 
       - name: Generate toolchain hash for building ONNX Runtime
-        if: inputs.build-onnxruntime
         id: ort-toolchain-hash
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         env:
@@ -275,7 +247,6 @@ jobs:
           printf 'HASH=%s\n' "$HASH" >> "$GITHUB_OUTPUT"
 
       - name: Restore ONNX Runtime ccache (macOS)
-        if: inputs.build-onnxruntime
         id: restore-ccache-ort
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -287,7 +258,6 @@ jobs:
             ccache-ort-${{ runner.os }}-universal-
 
       - name: Reset .ccache_ort stats
-        if: inputs.build-onnxruntime
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         env:
           CCACHE_DIR: '${{ github.workspace }}/.ccache_ort'
@@ -296,7 +266,6 @@ jobs:
           ccache -z
 
       - name: Build ONNX Runtime (macOS)
-        if: inputs.build-onnxruntime
         shell: pwsh
         env:
           GITHUB_TOKEN: '${{ github.token }}'
@@ -354,7 +323,6 @@ jobs:
           Install-Ort
 
       - name: Lipo ORT vcpkg_installed
-        if: inputs.build-onnxruntime
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         run: |
           ./scripts/lipo_vcpkg_macos.sh \
@@ -363,14 +331,13 @@ jobs:
             ./build_ort_x86_64/Release/vcpkg_installed/x64-osx
 
       - name: Save ORT ccache
-        if: inputs.build-obs && inputs.build-onnxruntime
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache_ort
           key: ${{ steps.restore-ccache-ort.outputs.cache-primary-key }}
 
       - name: Upload ONNX Runtime build logs
-        if: inputs.build-onnxruntime && always()
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Build ONNX Runtime logs
@@ -380,7 +347,7 @@ jobs:
           retention-days: 7
 
       - name: Show .ccache_ort stats
-        if: inputs.build-onnxruntime && always()
+        if: always()
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         env:
           CCACHE_DIR: '${{ github.workspace }}/.ccache_ort'
@@ -389,7 +356,6 @@ jobs:
           ccache -s
 
       - name: Build Plugin (macOS)
-        if: inputs.build-obs && inputs.build-onnxruntime
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true
@@ -412,7 +378,7 @@ jobs:
           cmake --build --preset macos --config RelWithDebInfo | tee build_plugin.log | xcbeautify
 
       - name: Upload Plugin build logs
-        if: inputs.build-obs && inputs.build-onnxruntime && always()
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Build Plugin logs
@@ -422,13 +388,11 @@ jobs:
           retention-days: 7
 
       - name: Install Plugin into stage
-        if: inputs.build-obs && inputs.build-onnxruntime
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         run: |
           cmake --install build --config RelWithDebInfo --strip --prefix build_stage
 
       - name: Extract dSYM
-        if: inputs.build-obs && inputs.build-onnxruntime
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         run: |
           mkdir -p release
@@ -438,7 +402,6 @@ jobs:
           ZSTD_CLEVEL=19 tar -acf "release/$PLUGIN_NAME.dSYM.tar.zst" --mac-metadata "build/$PLUGIN_NAME.dSYM"
 
       - name: Package Plugin (macOS)
-        if: inputs.build-obs && inputs.build-onnxruntime
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         run: |
           mkdir -p release
@@ -465,7 +428,6 @@ jobs:
             "release/$PLUGIN_NAME-$PLUGIN_VERSION-macos-universal.pkg"
 
       - name: Upload Plugin Binary
-        if: inputs.build-obs && inputs.build-onnxruntime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pluginbinary-${{ runner.os }}-universal-${{ github.run_id }}
