@@ -410,45 +410,41 @@ static cv::Mat guidedFilter(const cv::Mat &I, const cv::Mat &p, int r, double ep
 	return meanA.mul(I) + meanB;
 }
 
-/**
- * Stable mask refinement.
- *
- * Input: soft background mask at model resolution (255 = background).
- * Output: soft background mask at frame resolution.
- *
- * 1. Asymmetric temporal smoothing: the person is added quickly but removed slowly, so a one-frame
- *    dropout on the face does not punch a hole in it.
- * 2. Hysteresis: confident pixels (>= threshold + 0.2) seed the person; less confident pixels
- *    (>= threshold - 0.25) are kept only if they connect to a seed.
- * 3. Main subject: drop blobs smaller than 15% of the largest one (stray furniture, shelves).
- * 4. Fill holes inside the person that are smaller than 5% of the frame (face/shirt dropouts).
- * 5. Edge refinement: a guided filter on the camera image snaps the edge to hair and shoulders.
- */
-static void refineMaskStable(struct background_removal_filter *tf, const cv::Mat &imageBGRA,
-			     cv::Mat &backgroundMask)
+// Stable mask tuning
+constexpr double kRisingWeight = 0.9;         // weight of the new frame where the person grows
+constexpr double kFallingWeight = 0.6;        // ...and where it shrinks, so a one-frame dropout fades slowly
+constexpr float kStrongAboveThreshold = 0.2f; // confident pixels: threshold + 0.2 (max 0.95)
+constexpr float kWeakBelowThreshold = 0.25f;  // kept if connected to a confident pixel: threshold - 0.25 (min 0.05)
+constexpr double kMinBlobOfLargest = 0.15;    // drop blobs smaller than 15% of the largest one
+constexpr double kMaxHoleOfFrame = 0.05;      // fill enclosed holes smaller than 5% of the frame
+constexpr int kEdgeWorkLongSide = 960;        // guided filter works at most at this resolution
+
+/** 1. Asymmetric temporal smoothing: the person is added quickly but removed slowly. */
+static void smoothOverTime(cv::Mat &person, cv::Mat &lastPersonAlpha)
 {
-	cv::Mat person;
-	cv::Mat(255 - backgroundMask).convertTo(person, CV_32F, 1.0 / 255.0);
-
-	// 1. temporal
-	if (!tf->lastPersonAlpha.empty() && tf->lastPersonAlpha.size() == person.size()) {
-		cv::Mat fast, slow;
-		cv::addWeighted(person, 0.9, tf->lastPersonAlpha, 0.1, 0.0, fast);
-		cv::addWeighted(person, 0.6, tf->lastPersonAlpha, 0.4, 0.0, slow);
-		cv::Mat rising = person > tf->lastPersonAlpha;
-		fast.copyTo(slow, rising);
-		person = slow;
+	if (!lastPersonAlpha.empty() && lastPersonAlpha.size() == person.size()) {
+		cv::Mat rising, falling;
+		cv::addWeighted(person, kRisingWeight, lastPersonAlpha, 1.0 - kRisingWeight, 0.0, rising);
+		cv::addWeighted(person, kFallingWeight, lastPersonAlpha, 1.0 - kFallingWeight, 0.0, falling);
+		rising.copyTo(falling, person > lastPersonAlpha);
+		person = falling;
 	}
-	tf->lastPersonAlpha = person.clone();
+	lastPersonAlpha = person.clone();
+}
 
-	// 2. hysteresis
-	const float hi = std::min(tf->threshold + 0.2f, 0.95f);
-	const float lo = std::max(tf->threshold - 0.25f, 0.05f);
-	cv::Mat strong = person >= hi;
-	cv::Mat weak = person >= lo;
+/**
+ * 2 + 3. Hysteresis and main subject: weak pixels are kept only if their blob contains a strong pixel,
+ * and blobs much smaller than the largest are dropped. Returns a 0/255 mask of the person's core.
+ */
+static cv::Mat personCore(const cv::Mat &person, float threshold)
+{
+	const float hi = std::min(threshold + kStrongAboveThreshold, 0.95f);
+	const float lo = std::max(threshold - kWeakBelowThreshold, 0.05f);
+	const cv::Mat strong = person >= hi;
 
 	cv::Mat labels, stats, centroids;
-	const int n = cv::connectedComponentsWithStats(weak, labels, stats, centroids, 8, CV_32S);
+	const int n = cv::connectedComponentsWithStats(person >= lo, labels, stats, centroids, 8, CV_32S);
+
 	std::vector<uint8_t> keep((size_t)n, 0);
 	for (int y = 0; y < labels.rows; y++) {
 		const int32_t *l = labels.ptr<int32_t>(y);
@@ -459,9 +455,8 @@ static void refineMaskStable(struct background_removal_filter *tf, const cv::Mat
 			}
 		}
 	}
-	keep[0] = 0;
+	keep[0] = 0; // label 0 is everything below the weak threshold
 
-	// 3. main subject
 	int maxArea = 0;
 	for (int i = 1; i < n; i++) {
 		if (keep[(size_t)i]) {
@@ -469,10 +464,11 @@ static void refineMaskStable(struct background_removal_filter *tf, const cv::Mat
 		}
 	}
 	for (int i = 1; i < n; i++) {
-		if (keep[(size_t)i] && stats.at<int32_t>(i, cv::CC_STAT_AREA) < (int)(maxArea * 0.15)) {
+		if (keep[(size_t)i] && stats.at<int32_t>(i, cv::CC_STAT_AREA) < (int)(maxArea * kMinBlobOfLargest)) {
 			keep[(size_t)i] = 0;
 		}
 	}
+
 	cv::Mat core(person.size(), CV_8UC1);
 	for (int y = 0; y < labels.rows; y++) {
 		const int32_t *l = labels.ptr<int32_t>(y);
@@ -481,52 +477,59 @@ static void refineMaskStable(struct background_removal_filter *tf, const cv::Mat
 			c[x] = keep[(size_t)l[x]] ? 255 : 0;
 		}
 	}
+	return core;
+}
 
-	// 4. fill holes
-	{
-		cv::Mat inv = 255 - core;
-		cv::Mat hl, hs, hc;
-		const int hn = cv::connectedComponentsWithStats(inv, hl, hs, hc, 4, CV_32S);
-		const int maxHole = (int)(core.total() * 0.05);
-		std::vector<uint8_t> fill((size_t)hn, 0);
-		for (int i = 1; i < hn; i++) {
-			const int x = hs.at<int32_t>(i, cv::CC_STAT_LEFT);
-			const int y = hs.at<int32_t>(i, cv::CC_STAT_TOP);
-			const int w = hs.at<int32_t>(i, cv::CC_STAT_WIDTH);
-			const int h = hs.at<int32_t>(i, cv::CC_STAT_HEIGHT);
-			const int a = hs.at<int32_t>(i, cv::CC_STAT_AREA);
-			if (x > 0 && y > 0 && x + w < core.cols && y + h < core.rows && a < maxHole) {
-				fill[(size_t)i] = 1;
-			}
-		}
-		for (int y = 0; y < hl.rows; y++) {
-			const int32_t *l = hl.ptr<int32_t>(y);
-			uint8_t *c = core.ptr<uint8_t>(y);
-			for (int x = 0; x < hl.cols; x++) {
-				if (fill[(size_t)l[x]]) {
-					c[x] = 255;
-				}
+/** 4. Fill holes in the core that don't touch the frame edge and are smaller than kMaxHoleOfFrame. */
+static void fillSmallHoles(cv::Mat &core)
+{
+	cv::Mat labels, stats, centroids;
+	const int n = cv::connectedComponentsWithStats(255 - core, labels, stats, centroids, 4, CV_32S);
+	const int maxHole = (int)(core.total() * kMaxHoleOfFrame);
+
+	std::vector<uint8_t> fill((size_t)n, 0);
+	for (int i = 1; i < n; i++) {
+		const int x = stats.at<int32_t>(i, cv::CC_STAT_LEFT);
+		const int y = stats.at<int32_t>(i, cv::CC_STAT_TOP);
+		const int w = stats.at<int32_t>(i, cv::CC_STAT_WIDTH);
+		const int h = stats.at<int32_t>(i, cv::CC_STAT_HEIGHT);
+		const bool enclosed = x > 0 && y > 0 && x + w < core.cols && y + h < core.rows;
+		fill[(size_t)i] = enclosed && stats.at<int32_t>(i, cv::CC_STAT_AREA) < maxHole;
+	}
+	for (int y = 0; y < labels.rows; y++) {
+		const int32_t *l = labels.ptr<int32_t>(y);
+		uint8_t *c = core.ptr<uint8_t>(y);
+		for (int x = 0; x < labels.cols; x++) {
+			if (fill[(size_t)l[x]]) {
+				c[x] = 255;
 			}
 		}
 	}
+}
 
-	// soft alpha: zero outside a band around the core, solid inside it
-	const int kk = std::max(3, (std::max(core.rows, core.cols) / 80) | 1);
-	const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(kk, kk));
+/** Soft alpha: the model's probability near the core's edge, 0 well outside it, 1 well inside it. */
+static cv::Mat softAlpha(const cv::Mat &person, const cv::Mat &core)
+{
+	const int k = std::max(3, (std::max(core.rows, core.cols) / 80) | 1);
+	const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(k, k));
 	cv::Mat band, inner;
 	cv::dilate(core, band, kernel);
 	cv::erode(core, inner, kernel);
 	cv::Mat alpha = person.clone();
 	alpha.setTo(0.0f, band == 0);
 	alpha.setTo(1.0f, inner > 0);
+	return alpha;
+}
 
-	// 5. guided edge refinement at a capped working resolution
+/** 5. Snap the alpha's edge to the camera image (hair, shoulders) and scale it to the frame. */
+static cv::Mat refineEdgesToFrame(const cv::Mat &alpha, const cv::Mat &imageBGRA)
+{
 	const int frameW = imageBGRA.cols, frameH = imageBGRA.rows;
-	const int workLong = std::min(std::max(frameW, frameH), 960);
+	const int workLong = std::min(std::max(frameW, frameH), kEdgeWorkLongSide);
 	const double sc = (double)workLong / (double)std::max(frameW, frameH);
 	const cv::Size workSize(std::max(1, (int)std::lround(frameW * sc)), std::max(1, (int)std::lround(frameH * sc)));
 
-	cv::Mat alphaWork, grayWork, smallBGRA;
+	cv::Mat alphaWork, smallBGRA, grayWork;
 	cv::resize(alpha, alphaWork, workSize, 0, 0, cv::INTER_LINEAR);
 	cv::resize(imageBGRA, smallBGRA, workSize, 0, 0, cv::INTER_AREA);
 	cv::cvtColor(smallBGRA, grayWork, cv::COLOR_BGRA2GRAY);
@@ -536,6 +539,23 @@ static void refineMaskStable(struct background_removal_filter *tf, const cv::Mat
 	cv::Mat alpha8;
 	alphaWork.convertTo(alpha8, CV_8U, 255.0); // saturates to [0, 255]
 	cv::resize(alpha8, alpha8, imageBGRA.size(), 0, 0, cv::INTER_LINEAR);
+	return alpha8;
+}
+
+/**
+ * Stable mask: turns the model's soft background mask (model resolution, 255 = background) into the
+ * final background mask at frame resolution.
+ */
+static void refineMaskStable(struct background_removal_filter *tf, const cv::Mat &imageBGRA,
+			     cv::Mat &backgroundMask)
+{
+	cv::Mat person;
+	cv::Mat(255 - backgroundMask).convertTo(person, CV_32F, 1.0 / 255.0);
+
+	smoothOverTime(person, tf->lastPersonAlpha);
+	cv::Mat core = personCore(person, tf->threshold);
+	fillSmallHoles(core);
+	cv::Mat alpha8 = refineEdgesToFrame(softAlpha(person, core), imageBGRA);
 
 	if (tf->maskExpansion > 0) {
 		cv::dilate(alpha8, alpha8, cv::Mat(), cv::Point(-1, -1), tf->maskExpansion);
