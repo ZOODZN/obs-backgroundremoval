@@ -1,10 +1,10 @@
-# Builds the macOS installer for this branch (1.4.1 + RVM fix + memory watchdog).
-# Runs on every push to the rvm-fix branch, or from Actions > "Build macOS (RVM fix)" > Run workflow.
-name: Build macOS (RVM fix)
+# Builds the macOS installer (.pkg). Runs on every push to rvm-fix or main, or from
+# Actions > "Build macOS" > Run workflow. Download the result from the run's Artifacts.
+name: Build macOS
 
 on:
   push:
-    branches: [rvm-fix]
+    branches: [rvm-fix, main]
   workflow_dispatch:
 
 permissions: {}
@@ -22,7 +22,6 @@ jobs:
     uses: ./.github/workflows/plugin-build-macos.yml
     with:
       job-index: 0
-      environment: ''
       runs-on: macos-15
       DEVELOPER_DIR: /Applications/Xcode_16.4.app
       OSX_DEPLOYMENT_TARGET: ${{ needs.ci-config.outputs.OSX_DEPLOYMENT_TARGET }}

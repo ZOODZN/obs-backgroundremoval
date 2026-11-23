@@ -13,8 +13,6 @@ name: CI Config
 on:
   workflow_call:
     outputs:
-      WINDOWS_SDK_VERSION:
-        value: ${{ fromJson(jobs.ci-config.outputs.CMAKE_PRESETS_WINDOWS).cacheVariables.CMAKE_SYSTEM_VERSION }}
       OSX_DEPLOYMENT_TARGET:
         value: ${{ fromJson(jobs.ci-config.outputs.CMAKE_PRESETS_MACOS).cacheVariables.CMAKE_OSX_DEPLOYMENT_TARGET }}
       VCPKG_BINARY_SOURCES:
@@ -23,9 +21,7 @@ on:
 jobs:
   ci-config:
     outputs:
-      CMAKE_PRESETS_WINDOWS: ${{ steps.cmakepresets-json.outputs.windows }}
       CMAKE_PRESETS_MACOS: ${{ steps.cmakepresets-json.outputs.macos }}
-      CMAKE_PRESETS_LINUX: ${{ steps.cmakepresets-json.outputs.linux }}
 
     runs-on: ubuntu-slim
     timeout-minutes: 30
@@ -43,7 +39,7 @@ jobs:
         id: cmakepresets-json
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
         run: |
-          for name in windows macos linux; do
+          for name in macos; do
             printf '%s<<EOS\n' "$name" >> "$GITHUB_OUTPUT"
             <CMakePresets.json jq --arg presetName "$name" '.configurePresets[] | select(.name == $presetName)' | tee -a "$GITHUB_OUTPUT"
             printf '\nEOS\n' >> "$GITHUB_OUTPUT"

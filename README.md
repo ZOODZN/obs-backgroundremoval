@@ -1,133 +1,62 @@
-# OBS Plugin: Portrait Background Removal / Virtual Green-screen and Low-Light Enhancement
+# OBS Background Removal (ZOODESIGN build)
 
-<div align="center">
+A slimmed-down fork of [royshil/obs-backgroundremoval](https://github.com/royshil/obs-backgroundremoval) 1.4.1 for our OBS training sessions on Mac. It cuts the presenter out of the camera so the overlay's background shows through, or blurs the room behind them.
 
-[![GitHub](https://img.shields.io/github/license/royshil/obs-backgroundremoval)](https://github.com/royshil/obs-backgroundremoval/blob/main/LICENSE)
-[![GitHub Workflow Status](https://github.com/royshil/obs-backgroundremoval/actions/workflows/push.yaml/badge.svg)](https://github.com/royshil/obs-backgroundremoval/actions/workflows/push.yaml)
-[![Total downloads](https://img.shields.io/github/downloads/royshil/obs-backgroundremoval/total)](https://github.com/royshil/obs-backgroundremoval/releases)
-![Flathub](https://img.shields.io/flathub/downloads/com.obsproject.Studio.Plugin.BackgroundRemoval?label=Flathub%20Installs)
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/royshil/obs-backgroundremoval)](https://github.com/royshil/obs-backgroundremoval/releases)
+Everything we don't use has been removed: other platforms, other models, the Enhance portrait filter, focal blur and the update checker. Git history keeps all of it.
 
-</div>
+## What it does
 
-A plugin for [OBS Studio](https://obsproject.com/) that allows you to replace the background in portrait images and video, as well as enhance low-light scenes.
+| Setting | Options | Default |
+| --- | --- | --- |
+| Blur background | 0 = transparent, 1–20 = blur | 0 |
+| Segmentation model | Robust Video Matting, MediaPipe | Robust Video Matting |
+| RVM quality | Fast (320×192), Balanced (640 px), High (1024 px) | Balanced |
+| Inference device | CoreML GPU (full precision), CPU | CoreML GPU |
+| # CPU threads | 0–8 (CPU only) | 4 |
+| Threshold | How sure the model must be before a pixel counts as you | 0.50 |
+| Mask expansion | Grow (+) or shrink (–) the cut-out, in pixels | 0 |
+| Calculate every X frame | Work out a new cut-out every X frames | 1 |
 
-<p align="center">
-  <a href="https://royshil.github.io/obs-backgroundremoval/">
-    <b>⬇️ Download & Install OBS Background Removal ⬇️</b>
-  </a>
-</p>
+Everything except Blur background sits under **Advanced settings**.
 
-Or, browse versions on [releases page](https://github.com/royshil/obs-backgroundremoval/releases).
+How the cut-out is made, on every frame:
 
-> Not working? Please try [the Lite version (Live Background Removal Lite)](https://github.com/kaito-tokyo/live-backgroundremoval-lite) developed by one of us (Kaito Udagawa).
+1. **Robust Video Matting at the camera's real shape.** The model runs at the frame's aspect ratio and uses its own edge refiner, instead of squashing the frame to 320×192.
+2. **Stable mask.** Asymmetric smoothing over time, hysteresis thresholding, keeping only the main subject, filling small holes in the face or shirt, and a guided filter that snaps the edge to hair and shoulders.
+3. **Off OBS's video thread.** The cut-out is worked out on its own thread, so slow processing lowers the mask rate instead of stalling OBS.
+4. **Memory safeguard.** If OBS's memory grows by more than 3 GB, the filter rebuilds the model, then switches to CPU, then pauses (the camera passes through unchanged). Each step is written to the OBS log.
 
-## Usage
+Scenes saved with the full plugin keep working: a removed model switches to Robust Video Matting, and a removed inference device (plain CoreML, CUDA and so on) switches to CoreML GPU.
 
-<div style="text-align:center;">
-<video src="https://github.com/royshil/obs-backgroundremoval/assets/1067855/5ba5aae2-7ea2-4c90-ad45-fba5ccde1a4e" width="320"></video>
-</div>
+## Install
 
-Check out the [usage guide page](https://royshil.github.io/obs-backgroundremoval/usage/) for usage walkthrough and recommendations.
+Use the installer and setup guide in the training-assets repo: `obs-plugins/README.md`.
 
-Additional tutorial videos:
+## Build
 
-- [▶︎ Official guide to the Background Removal plugin for OBS Studio on YouTube](https://www.youtube.com/playlist?list=PLfd4SnaQQz_DVr_18OQozucYmiC56rRhy)
-- Depth of Field effect: https://youtu.be/jC3EKSpNjQk
-- Low-light enhancement: https://youtu.be/WSBLYWFrn2Q
-- Remove background from ANY object (not just human): https://youtu.be/N74VCDCToX8
+GitHub Actions builds the Mac installer on every push to `rvm-fix` or `main`, or from **Actions › Build macOS › Run workflow**. A build takes about 1–2 hours because it compiles OBS and ONNX Runtime from source. Download `pluginbinary-macOS-universal-…` from the run's **Artifacts**.
 
-## How to build from source
+The plugin is ad-hoc signed during packaging. Without that, macOS refuses to load it and OBS quits on start-up.
 
-**Windows**:
-
-```pwsh
-git clone https://github.com/royshil/obs-backgroundremoval.git
-```
-
-**Platforms we support building from source officially:**
+## Layout
 
 ```
-git clone https://github.com/royshil/obs-backgroundremoval.git
-cd obs-backgroundremoval
-sudo ./bin/bootstrap
-./bin/setup
-./bin/build
-sudo dpkg -i release/obs-backgroundremoval-*-linux-gnu.deb
+src/
+  background-filter.cpp     the filter: settings, worker thread, stable mask, memory safeguard, rendering
+  models/ModelRVM.hpp       Robust Video Matting at the frame's shape, recurrent state
+  models/ModelMediapipe.hpp MediaPipe fallback
+  ort-utils/                ONNX Runtime session (CPU or CoreML GPU)
+  required_operators_and_types.with_runtime_opt.config   operators ONNX Runtime is built with
+data/
+  models/                   the two models (ONNX Runtime format)
+  effects/                  blur and mask shaders
+  locale/en-US.ini          labels
+models/                     the two models' ONNX sources
+.github/workflows/          build-macos.yml (trigger), plugin-build-macos.yml, ci-config.yml
 ```
 
-The supported platforms are:
+If you add a model back, regenerate the operator config from all the shipped `.ort` models with ONNX Runtime's `create_config_from_models` (type reduction on), then keep the `com.microsoft;1;FusedConv` line. The saved runtime optimisations create FusedConv at load time, so the generator doesn't see it.
 
-- Debian Forky (x86_64 and arm64)
+## Credits and licence
 
-We plan to add building scripts for popular platforms such as Windows, Mac, and various distributions of Linux.
-
-## Introduction
-
-This plugin is meant to make it easy to replace the background in portrait images and video.
-It is using a neural network to predict the mask of the portrait and remove the background pixels.
-It's easily composable with other OBS plugins to replace the background with e.g. an image or
-a transparent color.
-
-If you like this work, which is given to you completely free of charge, please consider supporting it by sponsoring us on GitHub:
-
-- https://github.com/sponsors/royshil
-- https://github.com/sponsors/umireon
-
-### Support and Help
-
-Reach out to us on [GitHub Discussions](https://github.com/royshil/obs-backgroundremoval/discussions) or the [OBS Plugins forum](https://obsproject.com/forum/resources/background-removal-portrait-segmentation.1260/) for online / immediate help.
-
-If you found a bug or want to suggest a feature or improvement please open an [issue](https://github.com/royshil/obs-backgroundremoval/issues).
-
-If you are looking for hands-on help or private consultation please select a [sponsorship tier](https://github.com/sponsors/royshil?frequency=one-time).
-
-### Technical Details
-
-GPU support:
-
-- On Windows, we plan to support WinML acceleration.
-- On Mac we support CoreML for acceleration, which is efficient on Apple Silicon. **Note:** This plugin does not support cross-architecture translation (Rosetta2). Intel binaries on Apple Silicon or Apple Silicon binaries on Intel will crash.
-- On Linux CUDA, ROCM (deprecated in ONNX Runtime 1.23.0), and MIGraphX are supported if this plugin is built from source. Ensure your ONNX Runtime installation has CUDA, ROCM, or MIGraphX support. For AMD GPUs, MIGraphX is recommended as ROCM was removed from ONNX Runtime starting with version 1.23.0.
-- The goal of this plugin is to be available for everyone on every system, even if they don't own a GPU.
-
-Number of CPU threads is controllable through the UI settings. A 2-thread setting works best.
-
-The pretrained model weights used for portrait foreground segmentation are taken from:
-
-- https://github.com/anilsathyan7/Portrait-Segmentation/tree/master/SINet
-- https://github.com/PaddlePaddle/PaddleSeg/tree/release/2.7/contrib/PP-HumanSeg
-- https://github.com/PINTO0309/PINTO_model_zoo/tree/main/082_MediaPipe_Meet_Segmentation
-- https://github.com/PeterL1n/RobustVideoMatting
-- https://github.com/PINTO0309/PINTO_model_zoo/tree/main/384_TCMonoDepth and https://github.com/yu-li/TCMonoDepth
-
-Image enhancement (low light) models are taken from:
-
-- https://github.com/PINTO0309/PINTO_model_zoo/tree/main/213_TBEFN
-- https://github.com/PINTO0309/PINTO_model_zoo/tree/main/372_URetinex-Net
-- https://github.com/PINTO0309/PINTO_model_zoo/tree/main/370_Semantic-Guided-Low-Light-Image-Enhancement
-
-Some more information about how I built it: https://www.morethantechnical.com/2021/04/15/obs-plugin-for-portrait-background-removal-with-onnx-sinet-model/ and https://www.morethantechnical.com/2023/05/20/building-an-obs-background-removal-plugin-a-walkthrough/
-
-### Code Walkthrough
-
-This video on YouTube will take you through the major parts of the code and explain them.
-
-<div align="center">
-  <a href="https://youtu.be/iFQtcJg0Wsk" target="_blank">
-    <img width="50%" src="https://img.youtube.com/vi/iFQtcJg0Wsk/maxresdefault.jpg"/>
-  </a>
-</div>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=royshil/obs-backgroundremoval&type=Date&theme=dark" />
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=royshil/obs-backgroundremoval&type=Date" />
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=royshil/obs-backgroundremoval&type=Date" />
-</picture>
-
----
-
-> SPDX-FileCopyrightText: 2021-2026 Roy Shilkrot <roy.shil@gmail.com>  
-> SPDX-FileCopyrightText: 2023-2026 Kaito Udagawa <umireon@kaito.tokyo>  
->
-> SPDX-License-Identifier: GPL-3.0-or-later  
+Original plugin by Roy Shilkrot and Kaito Udagawa. GPL-3.0-or-later; see `LICENSE` and `LICENSES/`. Models keep their own licences beside each file.

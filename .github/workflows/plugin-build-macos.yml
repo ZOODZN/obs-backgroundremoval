@@ -17,11 +17,6 @@ on:
         description: The job index for logging.
         required: true
         type: number
-      environment:
-        description: The environment name for this workflow, or empty string for no environment
-        required: false
-        type: string
-        default: ''
       runs-on:
         description: The runner label to run this workflow on.
         required: true
@@ -54,25 +49,11 @@ on:
         type: boolean
         default: true
 
-    secrets:
-      MACOS_NOTARIZATION_PASSWORD:
-        required: false
-      MACOS_NOTARIZATION_USERNAME:
-        required: false
-      MACOS_SIGNING_APPLICATION_IDENTITY:
-        required: false
-      MACOS_SIGNING_CERT_PASSWORD:
-        required: false
-      MACOS_SIGNING_CERT:
-        required: false
-      MACOS_SIGNING_INSTALLER_IDENTITY:
-        required: false
 
 permissions: {}
 
 jobs:
   plugin-build-macos:
-    environment: ${{ inputs.environment }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 180
 
@@ -456,35 +437,19 @@ jobs:
           dsymutil "build/RelWithDebInfo/$PLUGIN_NAME.plugin/Contents/MacOS/$PLUGIN_NAME" -o "build/$PLUGIN_NAME.dSYM"
           ZSTD_CLEVEL=19 tar -acf "release/$PLUGIN_NAME.dSYM.tar.zst" --mac-metadata "build/$PLUGIN_NAME.dSYM"
 
-      - name: Set up macOS Signing Certificates
-        if: inputs.build-obs && inputs.build-onnxruntime && inputs.environment == 'production-macos'
-        id: codesign
-        uses: ./.github/actions/setup-macos-codesigning
-        with:
-          MACOS_SIGNING_APPLICATION_IDENTITY: ${{ secrets.MACOS_SIGNING_APPLICATION_IDENTITY }}
-          MACOS_SIGNING_CERT: ${{ secrets.MACOS_SIGNING_CERT }}
-          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
-
       - name: Package Plugin (macOS)
         if: inputs.build-obs && inputs.build-onnxruntime
         shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
-        env:
-          CODESIGN_ENABLED: "${{ inputs.environment == 'production-macos' }}"
-          MACOS_SIGNING_APPLICATION_IDENTITY: ${{ secrets.MACOS_SIGNING_APPLICATION_IDENTITY }}
-          MACOS_SIGNING_INSTALLER_IDENTITY: ${{ secrets.MACOS_SIGNING_INSTALLER_IDENTITY }}
         run: |
           mkdir -p release
           . ./build/cmake_export.sh
 
           PLUGIN_BUNDLE="build_stage/Library/Application Support/obs-studio/plugins/$PLUGIN_NAME.plugin"
 
-          if [[ "$CODESIGN_ENABLED" == true ]]; then
-            codesign -s "$MACOS_SIGNING_APPLICATION_IDENTITY" -f --deep --options runtime --timestamp "$PLUGIN_BUNDLE"
-          else
-            # Unsigned builds (forks): ad-hoc sign so macOS accepts the plugin's code signature
-            codesign --force --deep --sign - "$PLUGIN_BUNDLE"
-            codesign --verify --deep --strict --verbose=2 "$PLUGIN_BUNDLE"
-          fi
+          # No Apple developer certificate in this fork: ad-hoc sign after the install step's strip,
+          # otherwise macOS rejects the plugin at load time (SIGKILL, Code Signature Invalid)
+          codesign --force --deep --sign - "$PLUGIN_BUNDLE"
+          codesign --verify --deep --strict --verbose=2 "$PLUGIN_BUNDLE"
 
           pkgbuild \
             --root build_stage \
@@ -493,38 +458,11 @@ jobs:
             --install-location / \
             build/component.pkg
 
-          if [[ "$CODESIGN_ENABLED" == true ]]; then
-            productbuild \
-              --distribution build/Distribution \
-              --package-path build \
-              --resources . \
-              --sign "$MACOS_SIGNING_INSTALLER_IDENTITY" \
-              "release/$PLUGIN_NAME-$PLUGIN_VERSION-macos-universal.pkg"
-          else
-            productbuild \
-              --distribution build/Distribution \
-              --package-path build \
-              --resources . \
-              "release/$PLUGIN_NAME-$PLUGIN_VERSION-macos-universal.pkg"
-          fi
-
-      - name: Notarize Installer
-        if: inputs.build-obs && inputs.build-onnxruntime && inputs.environment == 'production-macos'
-        shell: bash --noprofile --norc -euo pipefail -O nullglob {0}
-        env:
-          CODESIGN_TEAM: '${{ steps.codesign.outputs.CODESIGN_TEAM }}'
-          MACOS_NOTARIZATION_PASSWORD: '${{ secrets.MACOS_NOTARIZATION_PASSWORD }}'
-          MACOS_NOTARIZATION_USERNAME: '${{ secrets.MACOS_NOTARIZATION_USERNAME }}'
-        run: |
-          . ./build/cmake_export.sh
-
-          xcrun notarytool submit "release/$PLUGIN_NAME-$PLUGIN_VERSION-macos-universal.pkg" \
-            --apple-id "$MACOS_NOTARIZATION_USERNAME" \
-            --password "$MACOS_NOTARIZATION_PASSWORD" \
-            --team-id "$CODESIGN_TEAM" \
-            --wait
-
-          xcrun stapler staple "release/$PLUGIN_NAME-$PLUGIN_VERSION-macos-universal.pkg"
+          productbuild \
+            --distribution build/Distribution \
+            --package-path build \
+            --resources . \
+            "release/$PLUGIN_NAME-$PLUGIN_VERSION-macos-universal.pkg"
 
       - name: Upload Plugin Binary
         if: inputs.build-obs && inputs.build-onnxruntime

@@ -5,16 +5,7 @@
 
 #include <onnxruntime_cxx_api.h>
 #include <cpu_provider_factory.h>
-#include <filesystem>
-
-#if defined(__APPLE__)
 #include <coreml_provider_factory.h>
-#endif
-
-#ifdef _WIN32
-#include <wchar.h>
-#include <windows.h>
-#endif // _WIN32
 
 #include <obs-module.h>
 
@@ -47,52 +38,17 @@ int createOrtSession(filter_data *tf)
 		return OBS_BGREMOVAL_ORT_SESSION_ERROR_FILE_NOT_FOUND;
 	}
 
-	std::string modelFilepath_s(modelFilepath_rawPtr);
-
-#if _WIN32
-	int outLength = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, modelFilepath_rawPtr, -1, nullptr, 0);
-	tf->modelFilepath = std::wstring(outLength, L'\0');
-	MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, modelFilepath_rawPtr, -1, tf->modelFilepath.data(), outLength);
-#else
 	tf->modelFilepath = std::string(modelFilepath_rawPtr);
-#endif
-
 	bfree(modelFilepath_rawPtr);
 
 	try {
-#ifdef HAVE_ONNXRUNTIME_CUDA_EP
-		if (tf->useGPU == USEGPU_CUDA) {
-			Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(sessionOptions, 0));
+		if (tf->useGPU == USEGPU_COREML_GPU) {
+			// ML Program on CPU + GPU only: keeps full float precision (the Neural Engine runs
+			// in reduced precision, which degrades Robust Video Matting's recurrent state)
+			const uint32_t coreml_flags = COREML_FLAG_ENABLE_ON_SUBGRAPH | COREML_FLAG_CREATE_MLPROGRAM |
+						      COREML_FLAG_USE_CPU_AND_GPU;
+			Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(sessionOptions, coreml_flags));
 		}
-#endif
-#ifdef HAVE_ONNXRUNTIME_ROCM_EP
-		if (tf->useGPU == USEGPU_ROCM) {
-			Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_ROCM(sessionOptions, 0));
-		}
-#endif
-#ifdef HAVE_ONNXRUNTIME_MIGRAPHX_EP
-		if (tf->useGPU == USEGPU_MIGRAPHX) {
-			Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_MIGraphX(sessionOptions, 0));
-		}
-#endif
-#ifdef HAVE_ONNXRUNTIME_TENSORRT_EP
-		if (tf->useGPU == USEGPU_TENSORRT) {
-			Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_Tensorrt(sessionOptions, 0));
-		}
-#endif
-#if defined(__APPLE__)
-		if (tf->useGPU == USEGPU_COREML || tf->useGPU == USEGPU_COREML_GPU) {
-			uint32_t coreml_flags = 0;
-			coreml_flags |= COREML_FLAG_ENABLE_ON_SUBGRAPH;
-			if (tf->useGPU == USEGPU_COREML_GPU) {
-				// ML Program on CPU + GPU only: keeps full float precision (the Neural Engine runs
-				// in reduced precision, which degrades Robust Video Matting's recurrent state)
-				coreml_flags |= COREML_FLAG_CREATE_MLPROGRAM | COREML_FLAG_USE_CPU_AND_GPU;
-			}
-			Ort::ThrowOnError(
-				OrtSessionOptionsAppendExecutionProvider_CoreML(sessionOptions, coreml_flags));
-		}
-#endif
 		tf->session.reset(new Ort::Session(*tf->env, tf->modelFilepath.c_str(), sessionOptions));
 	} catch (const std::exception &e) {
 		obs_log(LOG_ERROR, "%s", e.what());
