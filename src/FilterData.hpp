@@ -10,25 +10,25 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <string>
 
 #include "models/Model.hpp"
 #include "ort-utils/ORTModelData.hpp"
 
 /**
-  * @brief The filter_data struct
-  *
-  * This struct is used to store the base data needed for ORT filters.
-  *
-*/
-struct filter_data : public ORTModelData, public std::enable_shared_from_this<filter_data> {
+ * State shared by the model code and the OBS filter: the ONNX Runtime session, the chosen model and
+ * device, and the camera frame captured for the mask worker.
+ */
+struct filter_data : public ORTModelData {
 	std::string useGPU;
-	uint32_t numThreads;
+	uint32_t numThreads = 0;
 	std::string modelSelection;
 	std::unique_ptr<Model> model;
 
-	obs_source_t *source;
-	gs_texrender_t *texrender;
-	gs_stagesurf_t *stagesurface;
+	obs_source_t *source = nullptr;
+	gs_texrender_t *texrender = nullptr;
+	gs_stagesurf_t *stagesurface = nullptr;
 
 	cv::Mat inputBGRA;
 

@@ -34,7 +34,7 @@
 #include "obs-utils/obs-utils.hpp"
 #include "consts.h"
 
-struct background_removal_filter : public filter_data, public std::enable_shared_from_this<background_removal_filter> {
+struct background_removal_filter : public filter_data {
 	bool stopWhenSourceIsInactive = true;
 	float threshold = 0.5f;
 	int maskExpansion = 0;

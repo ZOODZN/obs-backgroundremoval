@@ -139,7 +139,7 @@ public:
 
 		if (inputDims[0].size() < 3 || outputDims[0].size() < 3) {
 			obs_log(LOG_ERROR, "Input or output tensor dims are < 3. input = %d, output = %d",
-				(int)inputDims.size(), (int)outputDims.size());
+				(int)inputDims[0].size(), (int)outputDims[0].size());
 			return false;
 		}
 

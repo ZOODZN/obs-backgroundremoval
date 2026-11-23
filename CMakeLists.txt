@@ -121,7 +121,10 @@ endblock()
 ### Plugin main
 add_library(obs-backgroundremoval_options INTERFACE)
 
-target_compile_definitions(obs-backgroundremoval_options INTERFACE SIMDE_ENABLE_OPENMP)
+target_compile_definitions(
+  obs-backgroundremoval_options
+  INTERFACE SIMDE_ENABLE_OPENMP PLUGIN_NAME_STR="${PLUGIN_NAME}" PLUGIN_VERSION_STR="${PLUGIN_VERSION}"
+)
 target_compile_options(obs-backgroundremoval_options INTERFACE -fopenmp-simd -Wall -Wextra -Werror)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
