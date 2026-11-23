@@ -21,17 +21,12 @@ function Initialize-ObsDeps {
 
         $buildspec = Get-Content -LiteralPath (Join-Path $RootDir 'buildspec.props') -Raw | ConvertFrom-StringData
 
-        if ($IsWindows) {
-            $url = $buildspec["${Component}_windows_x64_url"]
-            $sha256 = $buildspec["${Component}_windows_x64_sha256"]
+        if (-not $IsMacOS) {
+            throw 'This fork builds on macOS only'
         }
-        elseif ($IsMacOS) {
-            $url = $buildspec["${Component}_macos_url"]
-            $sha256 = $buildspec["${Component}_macos_sha256"]
-        }
-        else {
-            throw 'Unsupported platform'
-        }
+
+        $url = $buildspec["${Component}_macos_url"]
+        $sha256 = $buildspec["${Component}_macos_sha256"]
 
         $depsDir = New-Item (Join-Path $PluginBuildDir '.deps') -ItemType Directory -Force
         $outDir = Join-Path $depsDir "obs-deps-$Component"
@@ -47,14 +42,8 @@ function Initialize-ObsDeps {
         }
 
         if (!(Test-Path -LiteralPath $outdir)) {
-            if ($IsWindows) {
-                Expand-Archive -LiteralPath $outfile -Destination $outdir -Force
-            } elseif ($IsMacOS) {
-                $outDir = New-Item $outDir -ItemType Directory -Force
-                tar -xf "$outfile" -C $outdir
-            } else {
-                throw 'Unsupported platform'
-            }
+            $outDir = New-Item $outDir -ItemType Directory -Force
+            tar -xf "$outfile" -C $outdir
         }
     }
 }
@@ -63,9 +52,7 @@ function Invoke-ObsConfigure {
     [CmdletBinding()]
     param(
         [string]$RootDir = $PWD,
-        [string]$PluginBuildDir = $env:PLUGIN_BUILD_DIR ?? $RootDir,
-        [string]$Generator = $null,
-        [string]$VsVersionRange = '[17,)'
+        [string]$PluginBuildDir = $env:PLUGIN_BUILD_DIR ?? $RootDir
     )
     process {
         Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; $ProgressPreference = 'SilentlyContinue'
@@ -90,33 +77,13 @@ function Invoke-ObsConfigure {
             "-DOBS_VERSION_OVERRIDE=$($buildspec['obs_studio_git_tag'])"
         )
 
-        if ($IsWindows) {
-            $windowsPreset = $cmakePresets.configurePresets | Where-Object { $_.name -eq 'windows' }
+        $macOSPreset = $cmakePresets.configurePresets | Where-Object { $_.name -eq 'macos' }
 
-            $arch = $windowsPreset.architecture
-            $windowsSdkVersion = $windowsPreset.cacheVariables.CMAKE_SYSTEM_VERSION
-
-            $cmakeConfigureArgs += @(
-                '-A', $arch,
-                "-DCMAKE_SYSTEM_VERSION=$windowsSdkVersion"
-            )
-
-            if ($Generator) {
-                $cmakeConfigureArgs += @('-G', $Generator)
-            }
-        }
-        elseif ($IsMacOS) {
-            $macOSPreset = $cmakePresets.configurePresets | Where-Object { $_.name -eq 'macos' }
-
-            $cmakeConfigureArgs += @(
-                '-G', 'Xcode',
-                "-DCMAKE_OSX_ARCHITECTURES=$($macOSPreset.cacheVariables.CMAKE_OSX_ARCHITECTURES)",
-                "-DCMAKE_OSX_DEPLOYMENT_TARGET=$($macOSPreset.cacheVariables.CMAKE_OSX_DEPLOYMENT_TARGET)"
-            )
-        }
-        else {
-            throw 'Unsupported platform'
-        }
+        $cmakeConfigureArgs += @(
+            '-G', 'Xcode',
+            "-DCMAKE_OSX_ARCHITECTURES=$($macOSPreset.cacheVariables.CMAKE_OSX_ARCHITECTURES)",
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET=$($macOSPreset.cacheVariables.CMAKE_OSX_DEPLOYMENT_TARGET)"
+        )
 
         cmake $cmakeConfigureArgs
     }

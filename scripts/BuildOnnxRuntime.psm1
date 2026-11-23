@@ -44,80 +44,19 @@ function Get-OrtToolchain {
         [string]$PluginBuildDir = $env:PLUGIN_BUILD_DIR ?? $RootDir,
         [string]$VcpkgRoot = $env:VCPKG_ROOT ?? (Join-Path $PluginBuildDir 'vcpkg'),
         [Parameter(Mandatory = $true)]
-        [string]$Name,
-        [string]$OrtToolchainDir = (Join-Path $PluginBuildDir '.deps' 'ort_toolchain')
+        [ValidateSet('cmake', 'ninja')]
+        [string]$Name
     )
     process {
         Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; $ProgressPreference = 'SilentlyContinue'
 
+        if (-not $IsMacOS) {
+            throw 'This fork builds on macOS only'
+        }
+
+        # vcpkg downloads its pinned copy of the tool and prints the path on the last line
         $vcpkgExe = Join-Path $VcpkgRoot 'vcpkg'
-
-        $vcpkgToolsJsonPath = Join-Path $VcpkgRoot 'scripts' 'vcpkg-tools.json'
-        $vcpkgToolsJson = Get-Content -LiteralPath $vcpkgToolsJsonPath | Out-String | ConvertFrom-Json -AsHashtable
-        $vcpkgTools = $vcpkgToolsJson.tools | Group-Object { "$($_['arch'] ?? 'unknown')_$($_['os'])_$($_['name'])" } -AsHashTable -AsString
-
-        function Install-VcpkgTool {
-            param(
-                [Parameter(Mandatory = $true)]
-                [hashtable]$Tool
-            )
-            process {
-                New-Item $OrtToolchainDir -ItemType 'Directory' -Force
-
-                $outfile = Join-Path $OrtToolchainDir (Split-Path $Tool.url -Leaf)
-                $outdir = Join-Path $OrtToolchainDir $Tool.name
-
-                if (-not (Test-Path $outfile)) {
-                    Invoke-WebRequest -Uri $Tool.url -OutFile $outfile
-                }
-
-                $fileHash = Get-FileHash -LiteralPath $outfile -Algorithm SHA512
-                if ($fileHash.Hash -ine $Tool.sha512) {
-                    throw "Checksum verification failed: $Name expected=$($Tool.sha512) actual=$($fileHash.Hash)"
-                }
-
-                if (-not (Test-Path -LiteralPath $outdir)) {
-                    if ((Split-Path $Tool.url -Extension) -imatch '^\.(zip|tar\.gz)$') {
-                        Expand-Archive -LiteralPath $outfile -Destination $outdir -Force
-                    }
-                    else {
-                        throw 'Tool artifact in not supported format'
-                    }
-                }
-
-                Join-Path $outdir $Tool.executable
-            }
-
-        }
-
-        if ($IsWindows) {
-            if ($Name -eq 'cmake') {
-                Install-VcpkgTool -Tool $vcpkgTools.amd64_windows_cmake[0]
-            }
-            elseif ($Name -eq 'ninja') {
-                Install-VcpkgTool -Tool $vcpkgTools.x64_windows_ninja[0]
-            }
-            elseif ($Name -eq 'vswhere') {
-                & $vcpkgExe fetch vswhere | Select-Object -Last 1
-            }
-            else {
-                throw "Unsupported tool name: $Name"
-            }
-        }
-        elseif ($IsMacOS) {
-            if ($Name -eq 'cmake') {
-                & $vcpkgExe fetch cmake | Select-Object -Last 1
-            }
-            elseif ($Name -eq 'ninja') {
-                & $vcpkgExe fetch ninja | Select-Object -Last 1
-            }
-            else {
-                throw "Unsupported tool name: $Name"
-            }
-        }
-        else {
-            throw 'Unsupported platform'
-        }
+        & $vcpkgExe fetch $Name | Select-Object -Last 1
     }
 }
 
@@ -131,10 +70,8 @@ function Invoke-OrtBuildPy {
         [string]$Config = $env:CMAKE_BUILD_TYPE ?? 'Release',
         [string]$ReducedOpsConfigPath = $null,
         [string]$PythonExe = $env:PYTHON,
-        [string]$VsVersionRange = '[17,]',
         [string]$OsxArchitectures = $env:CMAKE_OSX_ARCHITECTURES,
-        [string]$OsxDeploymentTarget = $env:CMAKE_OSX_DEPLOYMENT_TARGET,
-        [string]$WindowsSdkVersion = $env:CMAKE_SYSTEM_VERSION
+        [string]$OsxDeploymentTarget = $env:CMAKE_OSX_DEPLOYMENT_TARGET
     )
     process {
         Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; $ProgressPreference = 'SilentlyContinue'
@@ -198,57 +135,37 @@ function Invoke-OrtBuildPy {
             $buildPyArgs += '--use_cache'
         }
 
-        if ($IsWindows) {
-            if (-not $WindowsSdkVersion -and $cmakePresets) {
-                $windowsPreset = $cmakePresets.configurePresets | Where-Object { $_.name -eq 'windows' }
-                $WindowsSdkVersion = $windowsPreset.cacheVariables.CMAKE_SYSTEM_VERSION
-            }
-
-            $ortBuildDir = Join-Path $PluginBuildDir 'build_ort'
-
-            $buildPyArgs += @(
-                '--build_dir', $ortBuildDir,
-                '--cmake_generator', 'Ninja',
-                '--windows_sdk_version', $WindowsSdkVersion
-            )
-
-            if (-not $PythonExe) {
-                $PythonExe = Join-Path $PluginBuildDir '.venv' 'Scripts' 'python.exe'
-            }
-        }
-        elseif ($IsMacOS) {
-            if (-not $OsxArchitectures) {
-                throw 'CMAKE_OSX_ARCHITECTURES not provided'
-            }
-
-            if (-not $OsxDeploymentTarget -and $cmakePresets) {
-                $cmakePresets = Get-Content -LiteralPath (Join-Path $RootDir 'CMakePresets.json') -Raw | ConvertFrom-Json
-                $macOSPreset = $cmakePresets.configurePresets | Where-Object { $_.name -eq 'macos' }
-                $OsxDeploymentTarget = $macOSPreset.cacheVariables.CMAKE_OSX_DEPLOYMENT_TARGET
-            }
-
-            if (-not $OsxDeploymentTarget) {
-                throw 'CMAKE_OSX_DEPLOYMENT_TARGET not provided'
-            }
-
-            $ortBuildDir = Join-Path $PluginBuildDir "build_ort_$OsxArchitectures"
-
-            $buildPyArgs += @(
-                '--build_dir', $ortBuildDir,
-                '--cmake_generator', 'Ninja',
-                '--apple_deploy_target', $OsxDeploymentTarget,
-                '--osx_arch', $OsxArchitectures,
-                '--use_coreml'
-            )
-
-            $buildPyCMakeExtraDefines += "CMAKE_OSX_DEPLOYMENT_TARGET=$OsxDeploymentTarget"
-
-            if (-not $PythonExe) {
-                $PythonExe = Join-Path $PluginBuildDir '.venv' 'bin' 'python3'
-            }
-        }
-        else {
+        if (-not $IsMacOS) {
             throw "Unsupported platform: $($PSVersionTable.OS)"
+        }
+
+        if (-not $OsxArchitectures) {
+            throw 'CMAKE_OSX_ARCHITECTURES not provided'
+        }
+
+        if (-not $OsxDeploymentTarget -and $cmakePresets) {
+            $macOSPreset = $cmakePresets.configurePresets | Where-Object { $_.name -eq 'macos' }
+            $OsxDeploymentTarget = $macOSPreset.cacheVariables.CMAKE_OSX_DEPLOYMENT_TARGET
+        }
+
+        if (-not $OsxDeploymentTarget) {
+            throw 'CMAKE_OSX_DEPLOYMENT_TARGET not provided'
+        }
+
+        $ortBuildDir = Join-Path $PluginBuildDir "build_ort_$OsxArchitectures"
+
+        $buildPyArgs += @(
+            '--build_dir', $ortBuildDir,
+            '--cmake_generator', 'Ninja',
+            '--apple_deploy_target', $OsxDeploymentTarget,
+            '--osx_arch', $OsxArchitectures,
+            '--use_coreml'
+        )
+
+        $buildPyCMakeExtraDefines += "CMAKE_OSX_DEPLOYMENT_TARGET=$OsxDeploymentTarget"
+
+        if (-not $PythonExe) {
+            $PythonExe = Join-Path $PluginBuildDir '.venv' 'bin' 'python3'
         }
 
         if ($Command -eq 'update') {
@@ -261,25 +178,7 @@ function Invoke-OrtBuildPy {
             throw "Unsupported command: $Command"
         }
 
-        if ($IsWindows) {
-            $vsInstallationPath = vswhere -version "$VsVersionRange" -property installationPath
-
-            . (Join-Path $vsInstallationPath 'Common7' 'Tools' 'Launch-VsDevShell.ps1') -Arch amd64
-
-            $buildPyLauncherCode = @(
-              'import platform, runpy, sys',
-              'from pathlib import Path',
-              'platform.machine = lambda: "AMD64"',
-              'sys.argv = sys.argv[1:]',
-              'sys.path.insert(0, str(Path(sys.argv[0]).resolve().parent))',
-              'runpy.run_path(sys.argv[0], run_name="__main__")'
-            )
-
-            & $PythonExe -c ($buildPyLauncherCode -join [Environment]::NewLine) $buildPyPath $buildPyArgs --cmake_extra_defines $buildPyCMakeExtraDefines
-        }
-        else {
-            & $PythonExe $buildPyPath $buildPyArgs --cmake_extra_defines $buildPyCMakeExtraDefines
-        }
+        & $PythonExe $buildPyPath $buildPyArgs --cmake_extra_defines $buildPyCMakeExtraDefines
 
         if ($LASTEXITCODE -ne 0) {
             throw "build.py failed with exit code $LASTEXITCODE (command: $Command)"
@@ -295,12 +194,7 @@ function Install-Ort {
         [string]$OsxDeploymentTarget = $null
     )
     process {
-        if ($IsWindows) {
-            $ortBuildDir = Join-Path $PluginBuildDir 'build_ort' $Config
-            $ortInstalledDir = Join-Path $PluginBuildDir 'ort_installed'
-            cmake --install $ortBuildDir --config $Config --prefix $ortInstalledDir
-        }
-        elseif ($IsMacOS) {
+        if ($IsMacOS) {
             if (-not $OsxDeploymentTarget) {
                 $cmakePresets = Get-Content -LiteralPath (Join-Path $RootDir 'CMakePresets.json') -Raw | ConvertFrom-Json
                 $macOSPreset = $cmakePresets.configurePresets | Where-Object { $_.name -eq 'macos' }
@@ -343,6 +237,9 @@ function Install-Ort {
             $kleidiaiArm64 = Join-Path $ortPrefixDirs.arm64 'lib' 'libkleidiai.a'
             $kleidiaiUniversal = Join-Path $ortPrefixDirs.universal 'lib' 'libkleidiai.a'
             lipo -create $kleidiaiArm64 $dummyA -output $kleidiaiUniversal
+        }
+        else {
+            throw 'This fork builds on macOS only'
         }
     }
 }

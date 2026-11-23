@@ -18,13 +18,6 @@ param(
 
 Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true
 
-if ($IsWindows) {
-    $curlExe = 'curl.exe'
-}
-else {
-    $curlExe = 'curl'
-}
-
 $curlOpts = @(
     '-fL',
     '--retry', '5',
@@ -37,4 +30,4 @@ if ($Url.StartsWith('https://github.com/') -and $env:GITHUB_TOKEN) {
     )
 }
 
-& $curlExe $curlOpts $Url --output $Dst
+curl $curlOpts $Url --output $Dst
