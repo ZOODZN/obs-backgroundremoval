@@ -71,6 +71,17 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	~background_removal_filter() { obs_log(LOG_INFO, "Background removal filter destructor called"); }
 };
 
+/**
+ * OBS hands every callback the pointer returned by background_filter_create: a heap-allocated
+ * shared_ptr. Taking a local copy keeps the filter alive for the whole callback, even if
+ * background_filter_destroy runs on another thread meanwhile.
+ */
+static std::shared_ptr<background_removal_filter> filterFromData(void *data)
+{
+	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
+	return ptr ? *ptr : nullptr;
+}
+
 const char *background_filter_getname(void *unused)
 {
 	UNUSED_PARAMETER(unused);
@@ -172,13 +183,7 @@ void background_filter_update(void *data, obs_data_t *settings)
 {
 	obs_log(LOG_INFO, "Background filter updated");
 
-	// Cast to shared_ptr pointer and create a local shared_ptr
-	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
-	if (!ptr) {
-		return;
-	}
-
-	std::shared_ptr<background_removal_filter> tf = *ptr;
+	std::shared_ptr<background_removal_filter> tf = filterFromData(data);
 	if (!tf) {
 		return;
 	}
@@ -271,12 +276,7 @@ void background_filter_update(void *data, obs_data_t *settings)
 
 void background_filter_activate(void *data)
 {
-	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
-	if (!ptr) {
-		return;
-	}
-
-	std::shared_ptr<background_removal_filter> tf = *ptr;
+	std::shared_ptr<background_removal_filter> tf = filterFromData(data);
 	if (tf && tf->stopWhenSourceIsInactive) {
 		obs_log(LOG_INFO, "Background filter activated");
 		tf->isDisabled = false;
@@ -285,12 +285,7 @@ void background_filter_activate(void *data)
 
 void background_filter_deactivate(void *data)
 {
-	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
-	if (!ptr) {
-		return;
-	}
-
-	std::shared_ptr<background_removal_filter> tf = *ptr;
+	std::shared_ptr<background_removal_filter> tf = filterFromData(data);
 	if (tf && tf->stopWhenSourceIsInactive) {
 		obs_log(LOG_INFO, "Background filter deactivated");
 		tf->isDisabled = true;
@@ -311,10 +306,7 @@ void *background_filter_create(obs_data_t *settings, obs_source_t *source)
 		instance->source = source;
 		instance->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
 
-		std::string instanceName{"background-removal-inference"};
-		instance->env.reset(new Ort::Env(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR, instanceName.c_str()));
-
-		instance->modelSelection = MODEL_MEDIAPIPE;
+		instance->env.reset(new Ort::Env(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR, "background-removal-inference"));
 
 		// Create pointer to shared_ptr for the update call
 		auto ptr = new std::shared_ptr<background_removal_filter>(instance);
@@ -335,37 +327,34 @@ void background_filter_destroy(void *data)
 {
 	obs_log(LOG_INFO, "Background filter destroyed");
 
-	// Cast back to shared_ptr pointer
 	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
-	if (ptr) {
-		if (*ptr) {
-			// Mark as disabled to prevent further processing
-			(*ptr)->isDisabled = true;
-
-			// Stop the mask worker and wait for any mask in progress
-			{
-				std::lock_guard<std::mutex> lock((*ptr)->workMutex);
-				(*ptr)->workerStop = true;
-			}
-			(*ptr)->workCv.notify_all();
-			if ((*ptr)->worker.joinable()) {
-				(*ptr)->worker.join();
-			}
-
-			// Perform cleanup
-			obs_enter_graphics();
-			gs_texrender_destroy((*ptr)->texrender);
-			if ((*ptr)->stagesurface) {
-				gs_stagesurface_destroy((*ptr)->stagesurface);
-			}
-			gs_effect_destroy((*ptr)->effect);
-			gs_effect_destroy((*ptr)->kawaseBlurEffect);
-			obs_leave_graphics();
-		}
-		// Delete the pointer to shared_ptr
-		// This decrements the ref count. If no other threads hold a shared_ptr, the instance is deleted
-		delete ptr;
+	if (!ptr) {
+		return;
 	}
+	if (std::shared_ptr<background_removal_filter> tf = *ptr) {
+		tf->isDisabled = true;
+
+		// Stop the mask worker and wait for any mask in progress
+		{
+			std::lock_guard<std::mutex> lock(tf->workMutex);
+			tf->workerStop = true;
+		}
+		tf->workCv.notify_all();
+		if (tf->worker.joinable()) {
+			tf->worker.join();
+		}
+
+		obs_enter_graphics();
+		gs_texrender_destroy(tf->texrender);
+		if (tf->stagesurface) {
+			gs_stagesurface_destroy(tf->stagesurface);
+		}
+		gs_effect_destroy(tf->effect);
+		gs_effect_destroy(tf->kawaseBlurEffect);
+		obs_leave_graphics();
+	}
+	// Drop OBS's reference; the filter is freed once no callback still holds a copy
+	delete ptr;
 }
 
 static void processImageForBackground(struct background_removal_filter *tf, const cv::Mat &imageBGRA,
@@ -751,11 +740,7 @@ void background_filter_video_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
 
-	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
-	if (!ptr) {
-		return;
-	}
-	std::shared_ptr<background_removal_filter> tf = *ptr;
+	std::shared_ptr<background_removal_filter> tf = filterFromData(data);
 	if (!tf || tf->isDisabled || tf->memoryStopped) {
 		return;
 	}
@@ -821,70 +806,50 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 {
 	UNUSED_PARAMETER(_effect);
 
-	// Cast to shared_ptr pointer and create a local shared_ptr
-	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
-	if (!ptr) {
+	std::shared_ptr<background_removal_filter> tf = filterFromData(data);
+	if (!tf) {
 		return;
 	}
-
-	// Create a local shared_ptr
-	std::shared_ptr<background_removal_filter> tf = *ptr;
-
-	if (!tf || tf->isDisabled || tf->memoryStopped) {
-		// pass the camera through unchanged
-		if (tf && tf->source) {
+	// Show the camera unchanged
+	auto passThrough = [&tf]() {
+		if (tf->source) {
 			obs_source_skip_video_filter(tf->source);
 		}
+	};
+
+	if (tf->isDisabled || tf->memoryStopped) {
+		passThrough();
 		return;
 	}
 
+	// Captures the camera frame for the mask worker
 	uint32_t width, height;
-	if (!getRGBAFromStageSurface(tf.get(), width, height)) {
-		if (tf->source) {
-			obs_source_skip_video_filter(tf->source);
-		}
-		return;
-	}
-
-	if (!tf->effect) {
-		// Effect failed to load, skip rendering
-		if (tf->source) {
-			obs_source_skip_video_filter(tf->source);
-		}
+	if (!getRGBAFromStageSurface(tf.get(), width, height) || !tf->effect) {
+		passThrough();
 		return;
 	}
 
 	gs_texture_t *alphaTexture = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(tf->outputLock);
-
 		if (tf->backgroundMask.empty()) {
 			// No frame captured yet
-			if (tf->source) {
-				obs_source_skip_video_filter(tf->source);
-			}
+			passThrough();
 			return;
 		}
-
 		alphaTexture = gs_texture_create(tf->backgroundMask.cols, tf->backgroundMask.rows, GS_R8, 1,
 						 (const uint8_t **)&tf->backgroundMask.data, 0);
-
-		if (!alphaTexture) {
-			obs_log(LOG_ERROR, "Failed to create alpha texture");
-			if (tf->source) {
-				obs_source_skip_video_filter(tf->source);
-			}
-			return;
-		}
+	}
+	if (!alphaTexture) {
+		obs_log(LOG_ERROR, "Failed to create alpha texture");
+		passThrough();
+		return;
 	}
 
-	// Output the masked image
 	gs_texture_t *blurredTexture = blur_background(tf, width, height, alphaTexture);
 
 	if (!obs_source_process_filter_begin(tf->source, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING)) {
-		if (tf->source) {
-			obs_source_skip_video_filter(tf->source);
-		}
+		passThrough();
 		gs_texture_destroy(alphaTexture);
 		gs_texture_destroy(blurredTexture);
 		return;
